@@ -7,6 +7,40 @@
  let lightSystem;
  let viewportSystem;
  let nativeRuntime;
+ function captureFillCoverage(ctx, coverage, before) {
+   const width=ctx.canvas.width,height=ctx.canvas.height,restorers=[];
+   const mask=document.createElement('canvas');mask.width=width;mask.height=height;
+   const maskCtx=mask.getContext('2d');maskCtx.setTransform(ctx.getTransform());
+   const mark=(x,y)=>{if(x<0||y<0||x>=width||y>=height)return;const pixel=y*width+x;if(!Painter.lock_alpha||before.data[pixel*4+3]>0)coverage[pixel]=1;};
+   function replace(name,wrap){const original=ctx[name],descriptor=Object.getOwnPropertyDescriptor(ctx,name);if(typeof original!=='function')return;ctx[name]=wrap(original);restorers.push(()=>{if(descriptor)Object.defineProperty(ctx,name,descriptor);else delete ctx[name];});}
+   // Face / element / selection fills use paths and clipping. Replay only their geometry onto a mask.
+   for(const name of ['save','restore','beginPath','closePath','rect','roundRect','moveTo','lineTo','arc','arcTo','ellipse','bezierCurveTo','quadraticCurveTo','clip','translate','scale','rotate','transform','setTransform','resetTransform']) {
+     if(typeof maskCtx[name]!=='function')continue;
+     replace(name,original=>function(...args){const result=original.apply(this,args);maskCtx[name](...args);return result;});
+   }
+   for(const name of ['fill','fillRect'])replace(name,original=>function(...args){
+     const result=original.apply(this,args);
+     if(BarItems.slider_brush_opacity.get()>0){maskCtx.fillStyle='#ffffff';maskCtx.globalAlpha=1;maskCtx.globalCompositeOperation='source-over';maskCtx[name](...args);}
+     return result;
+   });
+   // Connected-color fills write selected pixels directly to ImageData, including identical RGBA.
+   replace('getImageData',original=>function(x,y,w,h,...args){
+     const image=original.call(this,x,y,w,h,...args),pixels=image.data;
+     const proxy=new Proxy(pixels,{
+       get(target,key){const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;},
+       set(target,key,value){const index=typeof key==='string'&&/^\d+$/.test(key)?Number(key):-1;
+         if(index>=0&&index<target.length&&BarItems.slider_brush_opacity.get()>0){const pixel=Math.floor(index/4);mark(Math.trunc(x)+pixel%image.width,Math.trunc(y)+Math.floor(pixel/image.width));}
+         return Reflect.set(target,key,value,target);
+       }
+     });
+     Object.defineProperty(image,'data',{value:proxy,configurable:true});return image;
+   });
+   return ()=>{
+     for(const restore of restorers.reverse())restore();
+     const pixels=maskCtx.getImageData(0,0,width,height).data;
+     for(let p=0;p<coverage.length;p++)if(pixels[p*4+3])mark(p%width,Math.floor(p/width));
+   };
+ }
  function getNativeRuntime(){if(!nativeRuntime){const runtime = NATIVE_RENDERER;nativeRuntime=runtime;}return nativeRuntime;}
  let actions = [], panel, box, timer, originalEdit, originalInit, processHandle;
  let writing = false, lightPreview, renderWindow, pluginInstance, fileSystem;
@@ -224,7 +258,7 @@ if c['ortho']: cam.type='ORTHO'; cam.ortho_scale=c['scale']*max(1,s.render.resol
 else: cam.sensor_fit='VERTICAL'; cam.angle=math.radians(c['fov'])
 s.render.filepath=d['output']; bpy.ops.wm.save_as_mainfile(filepath=d['output']+'.blend'); bpy.ops.render.render(write_still=True)
 `;
- Plugin.register(ID, {title: 'Blockbench Renderer', author: 'Codex', description: 'PBR 绘画、大纲光源、实时 PBR 显示模式与 GPU 路径追踪渲染', icon: 'light_mode', version: '1.2.0', min_version: '5.0.0', variant: 'desktop',
+ Plugin.register(ID, {title: 'Blockbench Renderer', author: 'Codex', description: 'PBR 绘画、大纲光源、实时 PBR 显示模式与 GPU 路径追踪渲染', icon: 'light_mode', version: '0.1.1', min_version: '5.0.0', variant: 'desktop',
  onload() {
    pluginInstance = this;
    this.projectProperty = new Property(ModelProject, 'array', 'cycles_lights', {default: []});
@@ -247,11 +281,28 @@ s.render.filepath=d['output']; bpy.ops.wm.save_as_mainfile(filepath=d['output']+
      if (!writing && callback && !isMap(t) && box.querySelector('[name=paint]').checked && !t.layers_enabled) {
        const wrapped = canvas => {
          const ctx = canvas.getContext('2d'), before = ctx.getImageData(0, 0, canvas.width, canvas.height);
-         const result = callback(canvas, Painter.current), after = ctx.getImageData(0, 0, canvas.width, canvas.height), v = values();
+         // Observe the native brush's accepted pixels, rather than inferring a stroke from RGB differences.
+         // Native brush rasterization has already applied shape, selection, UV and mirror restrictions here.
+         const coverage = new Uint8Array(canvas.width * canvas.height);
+         const brush = Toolbox.selected.id === 'brush_tool' ? Toolbox.selected.brush : null;
+         const changePixel = brush?.changePixel;
+         const finishFill = Toolbox.selected.id === 'fill_tool' ? captureFillCoverage(ctx,coverage,before) : null;
+         if (changePixel) brush.changePixel = function(x,y,color,falloff,settings) {
+           const result = changePixel.call(this,x,y,color,falloff,settings);
+           if (settings.texture === t && settings.opacity * falloff > 0 && !(Painter.lock_alpha && color.a === 0)) {
+             x=Math.floor(x);y=Math.floor(y);
+             if(x>=0&&y>=0&&x<canvas.width&&y<canvas.height)coverage[y*canvas.width+x]=1;
+           }
+           return result;
+         };
+         let result;
+         try { result = callback(canvas, Painter.current); }
+         finally { if (changePixel) brush.changePixel = changePixel;finishFill?.(); }
+         const after = ctx.getImageData(0, 0, canvas.width, canvas.height), v = values();
          writing = true;
          try { for (const k of ['roughness', 'metallic']) {
            const m = map(t, k); if (m.width !== canvas.width || m.height !== canvas.height) continue;
-           m.edit(c => { const mc = c.getContext('2d'), pixels = mc.getImageData(0, 0, c.width, c.height); for (let i = 0; i < after.data.length; i += 4) { if (before.data[i] !== after.data[i] || before.data[i+1] !== after.data[i+1] || before.data[i+2] !== after.data[i+2] || before.data[i+3] !== after.data[i+3]) { const n = Math.round(v[k] * 255); pixels.data[i] = pixels.data[i+1] = pixels.data[i+2] = n; pixels.data[i+3] = 255; } } mc.putImageData(pixels, 0, 0); }, {no_undo: true});
+           m.edit(c => { const mc = c.getContext('2d'), pixels = mc.getImageData(0, 0, c.width, c.height); for (let i = 0; i < after.data.length; i += 4) { if (coverage[i/4] || before.data[i] !== after.data[i] || before.data[i+1] !== after.data[i+1] || before.data[i+2] !== after.data[i+2] || before.data[i+3] !== after.data[i+3]) { const n = Math.round(v[k] * 255); pixels.data[i] = pixels.data[i+1] = pixels.data[i+2] = n; pixels.data[i+3] = 255; } } mc.putImageData(pixels, 0, 0); }, {no_undo: true});
          }} finally { writing = false; }
          return result;
        };
