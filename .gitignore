@@ -1,0 +1,22 @@
+# Dependencies and local caches
+/node_modules/
+/.cache/
+/coverage/
+
+# Intermediate bundles and downloaded development artifacts
+/renderer.bundle.js
+/renderer.bundle.js.map
+/vendor/pathtracer.cjs
+
+# Render test output (keep test scripts)
+/tests/*.png
+/test-results/
+/playwright-report/
+
+# Logs and OS metadata
+*.log
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# dist/blockbench_renderer.js is intentionally versioned.
