@@ -2,6 +2,7 @@
 import * as T from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js';
+import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 import { WebGLPathTracer, PhysicalSpotLight } from 'three-gpu-pathtracer';
 
 const LIMITS = {low: 2048, high: 2048};
@@ -31,12 +32,39 @@ function environment(brightness) {
   return texture;
 }
 const coord = a => new T.Vector3(a[0] / 16, -a[2] / 16, a[1] / 16);
+function denoiseMaterial() {
+  return new T.ShaderMaterial({
+    uniforms:{map:{value:null}},depthTest:false,depthWrite:false,blending:T.NoBlending,
+    vertexShader:'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
+    fragmentShader:`
+      uniform sampler2D map; varying vec2 vUv;
+      void main(){
+        ivec2 dimensions=textureSize(map,0),pixel=clamp(ivec2(vUv*vec2(dimensions)),ivec2(0),dimensions-1);
+        vec4 center=texelFetch(map,pixel,0);
+        vec3 reference=center.rgb/(1.0+max(max(center.r,center.g),center.b));
+        vec3 sum=vec3(0.0);float total=0.0;
+        for(int y=-2;y<=2;y++)for(int x=-2;x<=2;x++){
+          vec4 sampleColor=texelFetch(map,clamp(pixel+ivec2(x,y),ivec2(0),dimensions-1),0);
+          vec3 comparable=sampleColor.rgb/(1.0+max(max(sampleColor.r,sampleColor.g),sampleColor.b));
+          vec3 difference=comparable-reference;
+          float weight=exp(-float(x*x+y*y)/3.0-dot(difference,difference)/0.045-abs(sampleColor.a-center.a)*32.0)*sampleColor.a;
+          sum+=sampleColor.rgb*weight;total+=weight;
+        }
+        gl_FragColor=vec4(total>0.000001?sum/total:center.rgb,center.a);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+        #include <premultiplied_alpha_fragment>
+      }
+    `
+  });
+}
 export class RenderSession {
   get samplesGoal() { return this._samplesGoal; }
   set samplesGoal(value) { this._samplesGoal = sampleCount(value); }
   constructor(canvas, onStatus = () => {}) {
     this.canvas = canvas; this.onStatus = onStatus; this.mode = 'low'; this.disposed = false;
     this.resources = new Set(); this.generation = 0; this.frame = 0; this.started = performance.now();
+    this.denoiseEnabled=true;this.denoiseQuad=new FullScreenQuad(denoiseMaterial());
     this.renderer = new T.WebGLRenderer({canvas, antialias: true, alpha: true, preserveDrawingBuffer: true});
     this.renderer.setPixelRatio(1); this.renderer.outputColorSpace = T.SRGBColorSpace;
     this.renderer.toneMapping = T.ACESFilmicToneMapping; this.renderer.shadowMap.enabled = true;
@@ -68,6 +96,7 @@ export class RenderSession {
       pt._generator.dispose?.();
     }
     this.pathTracer = null;
+    this.denoiseQuad.material.uniforms.map.value=null;
     this.scene?.traverse(o => o.shadow?.dispose());
     this.controls?.dispose(); this.controls = null;
     this.resources.forEach(r => r.dispose()); this.resources.clear();
@@ -77,6 +106,7 @@ export class RenderSession {
     const token = ++this.generation; this.ready = false; this.failed = false;
     cancelAnimationFrame(this.frame); this.clearScene();
     this.data = data; this.options = {...options}; this.samplesGoal = options.samples;
+    this.denoiseEnabled=options.denoise!==false;
     this.onStatus('正在读取材质和模型…');
     const scene = this.scene = new T.Scene();
     const env = this.keep(environment(Number(options.world) || 0));
@@ -174,12 +204,29 @@ export class RenderSession {
         this.pathTracer.textureSize.set(512, 512); this.pathTracer.multipleImportanceSampling = true;
         this.pathTracer.renderDelay = 0; this.pathTracer.minSamples = 1; this.pathTracer.fadeDuration = 0;
         this.pathTracer.filterGlossyFactor = 0.5;
+        this.originalPresent=this.pathTracer.renderToCanvasCallback;
+        this.pathTracer.renderToCanvasCallback=(target,renderer,quad)=>{
+          if(this.denoiseEnabled&&this.pathTracer.samples>=1)this.presentDenoised(target);
+          else this.originalPresent(target,renderer,quad);
+        };
       }
       this.pathTracer.setScene(this.scene, this.camera); this.pathTracer.reset();
     }
     this.paused = false; this.started = performance.now(); this.dirty = true;
   }
   reset() { this.pathTracer?.reset(); this.completed = false; this.paused = false; this.started = performance.now(); this.dirty = true; }
+  presentDenoised(target){
+    const renderer=this.renderer,current=renderer.getRenderTarget(),autoClear=renderer.autoClear;
+    this.denoiseQuad.material.uniforms.map.value=target.texture;
+    try{renderer.setRenderTarget(null);renderer.autoClear=false;this.denoiseQuad.render(renderer);}
+    finally{renderer.setRenderTarget(current);renderer.autoClear=autoClear;}
+  }
+  redraw(){
+    const pt=this.pathTracer;if(this.mode!=='high'||!pt||pt.samples<1)return;
+    if(this.denoiseEnabled)this.presentDenoised(pt.target);
+    else{pt._quad.material.map=pt.target.texture;pt._quad.material.opacity=1;this.originalPresent(pt.target,this.renderer,pt._quad);}
+  }
+  setDenoise(enabled){this.denoiseEnabled=!!enabled;this.redraw();}
   animate() {
     if (this.disposed) return;
     this.frame = requestAnimationFrame(() => this.animate());
@@ -199,12 +246,14 @@ export class RenderSession {
     if (!this.ready || this.failed) throw Error('画面尚未准备好');
     if (this.mode === 'high' && (!this.pathTracer || this.pathTracer.samples < 20)) throw Error('请等待至少完成 20 轮光追采样');
     if (this.mode === 'low') this.renderer.render(this.scene, this.camera);
+    else this.redraw();
     return this.canvas.toDataURL('image/png');
   }
   dispose() {
     if (this.disposed) return;
     this.disposed = true; ++this.generation; cancelAnimationFrame(this.frame);
     this.clearScene();
+    this.denoiseQuad.material.dispose();this.denoiseQuad.dispose();
     this.canvas.removeEventListener('webglcontextlost', this.contextLost);
     this.renderer.dispose(); this.renderer.forceContextLoss();
   }

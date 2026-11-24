@@ -164,7 +164,8 @@
      <div class="pbr_buttons"><button name="pause">暂停</button><button name="reset">重新采样</button><button name="export">导出 PNG</button></div>
    </main>`;
    const forms = [new InputForm({
-     samples: {label: '采样次数', type: 'select', full_width: true, options: {'20':'20','32':'32','128':'128','512':'512','1024':'1024'}, value: '128'}
+     samples: {label: '采样次数', type: 'select', full_width: true, options: {'20':'20','32':'32','128':'128','512':'512','1024':'1024'}, value: '128'},
+     denoise: {label:'降噪',type:'checkbox',value:true}
    }), new InputForm({
      width: {label: '宽', type: 'number', full_width: true, min:64, max:2048, step:1, force_step:true, value:512},
      height: {label: '高', type: 'number', full_width: true, min:64, max:2048, step:1, force_step:true, value:512}
@@ -189,7 +190,7 @@
      catch (e) { status.textContent = '渲染准备失败：' + e.message; }
      finally { loading = false; root.querySelector('.pbr_settings').inert = false; root.querySelectorAll('button').forEach(el => el.disabled = false); root.querySelector('[name=pause]').textContent = '暂停'; }
    };
-   forms[0].on('change', ({changed_keys = []}) => { if (loading) return; if (changed_keys.includes('samples')) { session.samplesGoal = options().samples; session.reset(); } root.querySelector('[name=pause]').textContent = '暂停'; });
+   forms[0].on('change', ({changed_keys = []}) => { if (loading) return; if (changed_keys.includes('samples')) { session.samplesGoal = options().samples; session.reset(); root.querySelector('[name=pause]').textContent = '暂停'; } if(changed_keys.includes('denoise'))session.setDenoise(options().denoise); });
    forms[1].on('change', () => { if (loading) return; const o=options(); session.setSize(o.width,o.height); session.reset(); });
    forms[2].on('change', () => { if (loading) return; clearTimeout(renderWindow.refreshTimer); renderWindow.refreshTimer=setTimeout(refresh,200); });
    root.querySelector('[name=reset]').onclick = () => { session.reset(); root.querySelector('[name=pause]').textContent = '暂停'; };
