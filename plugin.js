@@ -259,7 +259,7 @@ if c['ortho']: cam.type='ORTHO'; cam.ortho_scale=c['scale']*max(1,s.render.resol
 else: cam.sensor_fit='VERTICAL'; cam.angle=math.radians(c['fov'])
 s.render.filepath=d['output']; bpy.ops.wm.save_as_mainfile(filepath=d['output']+'.blend'); bpy.ops.render.render(write_still=True)
 `;
- Plugin.register(ID, {title: 'Blockbench Renderer', author: 'Codex', description: 'PBR 绘画、大纲光源、实时 PBR 显示模式与 GPU 路径追踪渲染', icon: 'light_mode', version: '0.1.1', min_version: '5.0.0', variant: 'desktop',
+ Plugin.register(ID, {title: 'Blockbench Renderer', author: 'Codex', description: 'PBR 绘画、大纲光源、实时 PBR 显示模式与 GPU 路径追踪渲染', icon: 'light_mode', version: '0.2.0', min_version: '5.0.0', variant: 'desktop',
  onload() {
    pluginInstance = this;
    this.projectProperty = new Property(ModelProject, 'array', 'cycles_lights', {default: []});
