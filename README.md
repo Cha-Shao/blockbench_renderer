@@ -6,7 +6,7 @@ Blockbench 桌面版 5.x 插件。最终安装文件为 **`dist/blockbench_rende
 
 主视图区的「显示模式 → 低精度（实时PBR模式）」用于实时编辑预览，可继续选择、移动、旋转和绘画；切回其他显示模式会恢复原材质与灯光。工具菜单只保留一个「渲染」入口，默认高精度 GPU 光追。设置在左侧竖排，右侧预览；按钮在预览下方。
 
-- 渲染：采样次数、降噪，固定使用高精度 GPU 光追，不显示渲染器选择栏。降噪默认开启，使用 GPU 双边滤波减轻噪点并尽量保留边缘；预览和 PNG 导出共用同一设置，透明背景保留原始 Alpha。切换降噪不重置采样，强噪声和极低采样仍应通过提高采样次数改善。
+- 渲染：采样次数、降噪，固定使用高精度 GPU 光追，不显示渲染器选择栏。降噪默认开启，使用 **OIDN Small（WebGPU）**，在采样结束后处理线性 HDR 原图及单独生成的底色、法线辅助图；预览和 PNG 导出共用降噪结果，并保留原始 Alpha。切换降噪不重置采样，移动相机会取消旧降噪任务。等待降噪完成后才能导出去噪 PNG，关闭降噪可导出原图。WebGPU 不可用时明确提示，不回退到模糊滤波。低采样仍可能损失细节，必要时增加采样次数。
 - 输出：分辨率，宽、高分别填写（64–2048 像素）。
 - 环境：环境光、透明背景。不生成额外地面。
 - 低精度（实时PBR模式）：实时 PBR、环境反射、阴影近似，方便调整视角。
@@ -31,7 +31,7 @@ Blockbench 桌面版 5.x 插件。最终安装文件为 **`dist/blockbench_rende
 
 ## Permission 提示
 
-内置渲染从内存读取模型和贴图，不申请 Node 文件模块权限。保存两张 PBR PNG 需要文件访问；这是 Blockbench 自身的权限提示。「Allow once」不保存授权，「Always allow for this plugin」会记住该插件的对应权限。插件也会缓存本次已授权文件模块，避免同一加载周期内重复请求。
+内置渲染从内存读取模型和贴图，不申请 Node 文件模块权限。OIDN Small 权重也直接内嵌，首次使用不联网下载。保存两张 PBR PNG 需要文件访问；这是 Blockbench 自身的权限提示。「Allow once」不保存授权，「Always allow for this plugin」会记住该插件的对应权限。插件也会缓存本次已授权文件模块，避免同一加载周期内重复请求。
 
 ## 限制
 
@@ -41,7 +41,9 @@ Blockbench 桌面版 5.x 插件。最终安装文件为 **`dist/blockbench_rende
 
 ## 开发与验证
 
-`plugin.js`、`lights.js`、`viewport.js`、`renderer.js` 是开发源码。运行 `npm ci`、`npm run build` 生成可分发的单文件 `dist/blockbench_renderer.js`，请勿直接改生成文件。`dist` 仅用于放最终安装产物，用户无需复制源码、测试或 `node_modules`。从早期版本更新时卸载旧的 Cycles 插件，再加载新文件；原有大纲光源类型保持兼容。
+`plugin.js`、`lights.js`、`viewport.js`、`renderer.js`、`oidn.js` 是开发源码。`vendor/rt_hdr_alb_nrm_small.tza` 是固定 models-v3 版本的 OIDN Small 模型（641,480 字节），构建时将其编码进插件。运行 `npm ci`、`npm run build` 生成可分发的单文件 `dist/blockbench_renderer.js`，请勿直接改生成文件。`dist` 仅用于放最终安装产物，用户无需复制模型文件、源码、测试或 `node_modules`。从早期版本更新时卸载旧的 Cycles 插件，再加载新文件；原有大纲光源类型保持兼容。
+
+模型来源：`https://github.com/pmndrs/denoiser-weights/tree/models-v3/tzas`。模型权重遵循 Apache 2.0，OIDN WebGPU 运行库遵循 MIT，许可均包含在打包文件中。当前 OIDN Small 接入按用户要求未执行额外回归/画质验证；旧版双档渲染的验证记录不代表此降噪接入已验证。
 
 `npm test` 用本地 Chrome 的独立无界面实例检查两档真实出图、20 轮采样下限、切换渲染器、尺寸调整、PNG、资源释放。测试脚本当前使用 Windows 默认 Chrome 路径。
 

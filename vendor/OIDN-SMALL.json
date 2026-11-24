@@ -1,0 +1,7 @@
+{
+  "file": "rt_hdr_alb_nrm_small.tza",
+  "source": "https://raw.githubusercontent.com/pmndrs/denoiser-weights/models-v3/tzas/rt_hdr_alb_nrm_small.tza",
+  "bytes": 641480,
+  "sha256": "980ea307e7825cae23ed8b1addf8de62ece84b61094795a5631ebf1c91b2e1a7",
+  "license": "Apache-2.0"
+}

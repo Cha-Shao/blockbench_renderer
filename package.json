@@ -7,6 +7,7 @@
     "test": "node tests/render.cjs"
   },
   "dependencies": {
+    "oidn-webgpu": "0.6.0",
     "three": "0.163.0",
     "three-gpu-pathtracer": "0.0.23",
     "three-mesh-bvh": "0.7.4",

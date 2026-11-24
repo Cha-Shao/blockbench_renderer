@@ -2,7 +2,7 @@
 import * as T from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js';
-import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
+import { SmallOIDN } from './oidn.js';
 import { WebGLPathTracer, PhysicalSpotLight } from 'three-gpu-pathtracer';
 
 const LIMITS = {low: 2048, high: 2048};
@@ -32,39 +32,13 @@ function environment(brightness) {
   return texture;
 }
 const coord = a => new T.Vector3(a[0] / 16, -a[2] / 16, a[1] / 16);
-function denoiseMaterial() {
-  return new T.ShaderMaterial({
-    uniforms:{map:{value:null}},depthTest:false,depthWrite:false,blending:T.NoBlending,
-    vertexShader:'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
-    fragmentShader:`
-      uniform sampler2D map; varying vec2 vUv;
-      void main(){
-        ivec2 dimensions=textureSize(map,0),pixel=clamp(ivec2(vUv*vec2(dimensions)),ivec2(0),dimensions-1);
-        vec4 center=texelFetch(map,pixel,0);
-        vec3 reference=center.rgb/(1.0+max(max(center.r,center.g),center.b));
-        vec3 sum=vec3(0.0);float total=0.0;
-        for(int y=-2;y<=2;y++)for(int x=-2;x<=2;x++){
-          vec4 sampleColor=texelFetch(map,clamp(pixel+ivec2(x,y),ivec2(0),dimensions-1),0);
-          vec3 comparable=sampleColor.rgb/(1.0+max(max(sampleColor.r,sampleColor.g),sampleColor.b));
-          vec3 difference=comparable-reference;
-          float weight=exp(-float(x*x+y*y)/3.0-dot(difference,difference)/0.045-abs(sampleColor.a-center.a)*32.0)*sampleColor.a;
-          sum+=sampleColor.rgb*weight;total+=weight;
-        }
-        gl_FragColor=vec4(total>0.000001?sum/total:center.rgb,center.a);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-        #include <premultiplied_alpha_fragment>
-      }
-    `
-  });
-}
 export class RenderSession {
   get samplesGoal() { return this._samplesGoal; }
   set samplesGoal(value) { this._samplesGoal = sampleCount(value); }
-  constructor(canvas, onStatus = () => {}) {
+  constructor(canvas, onStatus = () => {}, onDenoiseState = () => {}) {
     this.canvas = canvas; this.onStatus = onStatus; this.mode = 'low'; this.disposed = false;
     this.resources = new Set(); this.generation = 0; this.frame = 0; this.started = performance.now();
-    this.denoiseEnabled=true;this.denoiseQuad=new FullScreenQuad(denoiseMaterial());
+    this.denoiseEnabled=true;this.denoiser=new SmallOIDN(onDenoiseState);
     this.renderer = new T.WebGLRenderer({canvas, antialias: true, alpha: true, preserveDrawingBuffer: true});
     this.renderer.setPixelRatio(1); this.renderer.outputColorSpace = T.SRGBColorSpace;
     this.renderer.toneMapping = T.ACESFilmicToneMapping; this.renderer.shadowMap.enabled = true;
@@ -96,7 +70,7 @@ export class RenderSession {
       pt._generator.dispose?.();
     }
     this.pathTracer = null;
-    this.denoiseQuad.material.uniforms.map.value=null;
+    this.denoiser.cancel();
     this.scene?.traverse(o => o.shadow?.dispose());
     this.controls?.dispose(); this.controls = null;
     this.resources.forEach(r => r.dispose()); this.resources.clear();
@@ -148,7 +122,7 @@ export class RenderSession {
     this.camera.up.set(0, 0, 1); this.camera.position.fromArray(c.position);
     this.camera.lookAt(new T.Vector3().fromArray(c.target)); this.camera.updateMatrixWorld();
     this.controls = new OrbitControls(this.camera, this.canvas); this.controls.target.fromArray(c.target); this.controls.update();
-    this.controls.addEventListener('change', () => { this.pathTracer?.updateCamera(); this.started = performance.now(); this.completed = false; this.dirty = true; });
+    this.controls.addEventListener('change', () => { this.denoiser.cancel();this.pathTracer?.updateCamera(); this.started = performance.now(); this.completed = false; this.dirty = true; });
     this.setSize(options.width, options.height);
     this.ready = true; this.paused = false; this.setMode(options.mode || 'low');
     this.animate();
@@ -183,6 +157,7 @@ export class RenderSession {
     }
   }
   setSize(width, height) {
+    this.denoiser.cancel();
     const [w, h] = dimensions(width, height, this.mode); this.width = w; this.height = h;
     this.renderer.setSize(w, h, false);
     this.canvas.style.aspectRatio = `${w} / ${h}`;
@@ -193,6 +168,7 @@ export class RenderSession {
   setMode(mode) {
     if (!this.ready) return;
     if (mode === 'high' && this.highUnsupported) throw Error(this.highUnsupported);
+    this.denoiser.cancel();
     this.mode = mode === 'high' ? 'high' : 'low'; this.failed = false; this.completed = false;
     this.scene.traverse(o => { if (o.userData.previewOnly) o.visible = this.mode === 'low'; });
     this.scene.environment = this.mode === 'high' ? this.rawEnvironment : this.previewEnvironment;
@@ -205,28 +181,18 @@ export class RenderSession {
         this.pathTracer.renderDelay = 0; this.pathTracer.minSamples = 1; this.pathTracer.fadeDuration = 0;
         this.pathTracer.filterGlossyFactor = 0.5;
         this.originalPresent=this.pathTracer.renderToCanvasCallback;
-        this.pathTracer.renderToCanvasCallback=(target,renderer,quad)=>{
-          if(this.denoiseEnabled&&this.pathTracer.samples>=1)this.presentDenoised(target);
-          else this.originalPresent(target,renderer,quad);
-        };
       }
       this.pathTracer.setScene(this.scene, this.camera); this.pathTracer.reset();
     }
     this.paused = false; this.started = performance.now(); this.dirty = true;
   }
-  reset() { this.pathTracer?.reset(); this.completed = false; this.paused = false; this.started = performance.now(); this.dirty = true; }
-  presentDenoised(target){
-    const renderer=this.renderer,current=renderer.getRenderTarget(),autoClear=renderer.autoClear;
-    this.denoiseQuad.material.uniforms.map.value=target.texture;
-    try{renderer.setRenderTarget(null);renderer.autoClear=false;this.denoiseQuad.render(renderer);}
-    finally{renderer.setRenderTarget(current);renderer.autoClear=autoClear;}
-  }
+  reset() { this.denoiser.cancel();this.pathTracer?.reset(); this.completed = false; this.paused = false; this.started = performance.now(); this.dirty = true; }
   redraw(){
     const pt=this.pathTracer;if(this.mode!=='high'||!pt||pt.samples<1)return;
-    if(this.denoiseEnabled)this.presentDenoised(pt.target);
-    else{pt._quad.material.map=pt.target.texture;pt._quad.material.opacity=1;this.originalPresent(pt.target,this.renderer,pt._quad);}
+    pt._quad.material.map=this.denoiseEnabled&&this.denoiser.texture?this.denoiser.texture:pt.target.texture;
+    pt._quad.material.opacity=1;this.originalPresent(pt.target,this.renderer,pt._quad);
   }
-  setDenoise(enabled){this.denoiseEnabled=!!enabled;this.redraw();}
+  setDenoise(enabled){this.denoiseEnabled=!!enabled;if(!enabled)this.denoiser.cancel();else if(this.completed)this.denoiser.run(this);this.redraw();}
   animate() {
     if (this.disposed) return;
     this.frame = requestAnimationFrame(() => this.animate());
@@ -238,13 +204,19 @@ export class RenderSession {
         this.pathTracer.renderSample(); const samples = Math.floor(this.pathTracer.samples);
         this.completed = samples >= this.samplesGoal;
         if (this.failed) return;
-        this.onStatus(`高精度（GPU光追模式）${samples}/${this.samplesGoal}采样`);
+        this.onStatus(`${samples}/${this.samplesGoal}采样`);
+        if(this.completed&&this.denoiseEnabled)this.denoiser.run(this);
       }
     } catch (e) { this.failed = true; this.onStatus('渲染失败：' + e.message + '；可切换低精档'); }
   }
   getPNG() {
     if (!this.ready || this.failed) throw Error('画面尚未准备好');
     if (this.mode === 'high' && (!this.pathTracer || this.pathTracer.samples < 20)) throw Error('请等待至少完成 20 轮光追采样');
+    if(this.mode==='high'&&this.denoiseEnabled&&!this.denoiser.texture){
+      if(this.denoiser.error)throw Error('OIDN 降噪不可用，请关闭降噪后导出原图：'+this.denoiser.error);
+      if(!this.completed)throw Error('请等待采样结束和 OIDN Small 降噪完成');
+      this.denoiser.run(this);throw Error('OIDN Small 正在降噪，请稍后导出');
+    }
     if (this.mode === 'low') this.renderer.render(this.scene, this.camera);
     else this.redraw();
     return this.canvas.toDataURL('image/png');
@@ -253,7 +225,7 @@ export class RenderSession {
     if (this.disposed) return;
     this.disposed = true; ++this.generation; cancelAnimationFrame(this.frame);
     this.clearScene();
-    this.denoiseQuad.material.dispose();this.denoiseQuad.dispose();
+    this.denoiser.dispose();
     this.canvas.removeEventListener('webglcontextlost', this.contextLost);
     this.renderer.dispose(); this.renderer.forceContextLoss();
   }

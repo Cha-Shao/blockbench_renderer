@@ -165,7 +165,7 @@
    </main>`;
    const forms = [new InputForm({
      samples: {label: '采样次数', type: 'select', full_width: true, options: {'20':'20','32':'32','128':'128','512':'512','1024':'1024'}, value: '128'},
-     denoise: {label:'降噪',type:'checkbox',value:true}
+     denoise: {label:'降噪（OIDN Small）',type:'checkbox',value:true}
    }), new InputForm({
      width: {label: '宽', type: 'number', full_width: true, min:64, max:2048, step:1, force_step:true, value:512},
      height: {label: '高', type: 'number', full_width: true, min:64, max:2048, step:1, force_step:true, value:512}
@@ -178,7 +178,7 @@
    const dialog = new Dialog({id: 'pbr_native_render', title: '渲染', width: 900, lines: [], buttons: ['关闭'], onConfirm: closeRenderWindow, onCancel: closeRenderWindow});
    dialog.show(); dialog.object.querySelector('.dialog_content').append(root);
    let session;
-   try { session = new runtime.RenderSession(root.querySelector('canvas'), s => status.textContent = s); }
+   try { session = new runtime.RenderSession(root.querySelector('canvas'), s => status.textContent = s,(state,error)=>{const bar=forms[0].form_data.denoise.bar,label=bar.querySelector('.name_space_left');if(label)label.textContent=({idle:'降噪（OIDN Small）',loading:'降噪（加载中）',running:'降噪（处理中）',ready:'降噪（完成）',error:'降噪（不可用）'})[state];bar.title=error||'OIDN Small · HDR + 底色 + 法线';}); }
    catch (e) { status.textContent = '无法创建 GPU 渲染器：' + e.message; return; }
    renderWindow = {dialog, session, root, forms}; pluginInstance.renderSession = session;
    const options = () => { const v = Object.assign({}, ...forms.map(f => f.getResult())); return {...v, mode:'high', samples:Number(v.samples)}; };
